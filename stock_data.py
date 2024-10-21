@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import os, contextlib
+import os
+import contextlib
 
 # Set default limit and offset values
 limit = None  # Default to process all symbols if no limit is provided
@@ -52,26 +53,27 @@ timeframe_sma_ema = {
 # Function to calculate SMAs
 def calculate_sma(data, timeframes):
     for period in timeframes:
-        data[f'SMA_{period}'] = data['Adj Close'].rolling(window=period).mean()
+        # Use the minimum of the available days or the defined period for SMA
+        data[f'SMA_{period}'] = data['Close'].rolling(window=period, min_periods=1).mean()
     return data
 
 # Function to calculate EMAs
 def calculate_ema(data, timeframes):
     for period in timeframes:
-        data[f'EMA_{period}'] = data['Adj Close'].ewm(span=period, adjust=False).mean()
+        data[f'EMA_{period}'] = data['Close'].ewm(span=period, adjust=False).mean()
     return data
 
 # Function to calculate simple and log returns
 def calculate_returns(data):
     # Simple returns
-    data['Simple Return'] = data['Adj Close'].pct_change()
+    data['Simple Return'] = data['Close'].pct_change()
     
     # Logarithmic returns
-    data['Log Return'] = np.log(data['Adj Close'] / data['Adj Close'].shift(1))
+    data['Log Return'] = np.log(data['Close'] / data['Close'].shift(1))
     
     return data
 
-# Function to calculate historical volatility, adjusted for the timeframe
+# Function to calculate historical volatility with forward-fill for empty values
 def calculate_volatility(data, timeframe):
     # Set the appropriate number of periods in a year depending on the timeframe
     periods_in_year = {
@@ -91,31 +93,97 @@ def calculate_volatility(data, timeframe):
     annualization_factor = np.sqrt(periods_in_year[timeframe])
 
     # Calculate daily (or respective timeframe) volatility and annualize it
-    data['Volatility'] = data['Log Return'].rolling(window=window_size).std() * annualization_factor
+    def volatility_calculation(x):
+        if len(x) < 2:  # Less than 2 points, we can't calculate standard deviation
+            return np.nan
+        return np.std(x, ddof=0) * annualization_factor
+
+    data['Volatility'] = data['Log Return'].rolling(window=window_size, min_periods=1).apply(
+        volatility_calculation, raw=True
+    )
+
+    # Fill missing values with available data if there are less than 21 data points
+    for i in range(len(data)):
+        if pd.isna(data['Volatility'].iloc[i]) and i >= window_size:
+            available_data = data['Log Return'].iloc[i-window_size+1:i+1]
+            if len(available_data) > 0:
+                data['Volatility'].iloc[i] = volatility_calculation(available_data)
+
     return data
+    # Set the appropriate number of periods in a year depending on the timeframe
+    periods_in_year = {
+        'daily': 252,     # 252 trading days in a year
+        'weekly': 52,     # 52 weeks in a year
+        'monthly': 12,    # 12 months in a year
+        '3mo': 4,         # 4 quarters in a year (3-month periods)
+        '6mo': 2,         # 2 half-year periods in a year
+        '1y': 1,          # 1 year
+        '5y': 1/5         # 1 year spans 5 years (inverse)
+    }
+    
+    # Default window size for rolling volatility is set to 21 periods (can be adjusted if needed)
+    window_size = 21
+
+    # Use the number of periods per year specific to the timeframe
+    annualization_factor = np.sqrt(periods_in_year[timeframe])
+
+    # Calculate daily (or respective timeframe) volatility and annualize it
+    data['Volatility'] = data['Log Return'].rolling(window=window_size, min_periods=1).apply(
+            lambda x: np.std(x, ddof=0) * annualization_factor, raw=True
+        )
+    
+    # Fill NaN or 0 values with the last available non-null value
+    data['Volatility'] = data['Volatility'].replace(0, np.nan).fillna(method='ffill')
+
+    return data
+
+
 
 # Function to calculate MACD for all timeframes
 def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
-   
-    data['MACD'] = data['Adj Close'].ewm(span=short_window, adjust=False).mean() - data['Adj Close'].ewm(span=long_window, adjust=False).mean()
+    data['MACD'] = data['Close'].ewm(span=short_window, adjust=False).mean() - data['Close'].ewm(span=long_window, adjust=False).mean()
     data['Signal Line'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()  # Signal line
     data['Histogram'] = data['MACD'] - data['Signal Line']
     return data
 
 # Function to calculate RSI
 def calculate_rsi(data, period=14):
-    delta = data['Adj Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    # Calculate the difference in price from the previous step
+    delta = data['Close'].diff()
+
+    # Calculate gains (positive deltas) and losses (negative deltas)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+
+    # Initialize average gains and losses
+    avg_gain = gain.rolling(window=period, min_periods=1).mean()
+    avg_loss = loss.rolling(window=period, min_periods=1).mean()
+
+    # Use the first value of average gain/loss to smooth the remaining values
+    for i in range(period, len(data)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
+
+    # Calculate the relative strength (RS)
+    rs = avg_gain / avg_loss
+
+    # Calculate RSI
     data['RSI'] = 100 - (100 / (1 + rs))
+
     return data
+
 
 # Function to calculate Bollinger Bands
 def calculate_bollinger_bands(data, window=20, num_std_dev=2):
-    data['Middle Band'] = data['Adj Close'].rolling(window=window).mean()
-    data['Upper Band'] = data['Middle Band'] + (data['Adj Close'].rolling(window=window).std() * num_std_dev)
-    data['Lower Band'] = data['Middle Band'] - (data['Adj Close'].rolling(window=window).std() * num_std_dev)
+    data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
+    data['Middle Band'] = data['Close'].rolling(window=window, min_periods=1).mean()
+    
+    # Use NumPy's std
+    rolling_std = data['Close'].rolling(window=window, min_periods=1).apply(lambda x: np.std(x, ddof=0))  # ddof=0 for population std deviation
+
+    data['Upper Band'] = data['Middle Band'] + (rolling_std * num_std_dev)
+    data['Lower Band'] = data['Middle Band'] - (rolling_std * num_std_dev)
+
     return data
 
 
@@ -164,19 +232,17 @@ with open(os.devnull, 'w') as devnull:
                 # Calculate Bollinger Bands
                 data = calculate_bollinger_bands(data)
 
-
                 # Save the data for each timeframe
                 data.to_csv(f'{output_dir}/{s}_{timeframe}.csv')
 
                 # Save dividends, splits, and other data for the symbol
                 stock = yf.Ticker(s)
 
-                # # Save dividends data if available
+                # Uncomment to save other data if needed
                 # dividends = stock.dividends
                 # if not dividends.empty:
                 #     dividends.to_csv(f'{output_dir}/{s}_dividends.csv')
 
-                # # Save stock splits data if available
                 # splits = stock.splits
                 # if not splits.empty:
                 #     splits.to_csv(f'{output_dir}/{s}_splits.csv')
