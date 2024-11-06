@@ -9,17 +9,49 @@ limit = None  # Default to process all symbols if no limit is provided
 offset = 0    # Default starting offset
 
 timeframes = {
+    '1m': '1m',
+    '2m': '2m',
+    '5m': '5m',
+    '15m': '15m',
+    '30m': '30m',
+    '90m': '90m',
+    '1h': '1h',
     'daily': '1d',
     'weekly': '1wk',
     'monthly': '1mo',
-    '3mo': '3mo',
-    '6mo': '6mo',
-    '1y': '1y',
-    '5y': '5y'
+    '3mo': '3mo'
 }
 
-# Timeframes for different data resolutions
+# Timeframes for different intraday and daily data resolutions
 timeframe_sma_ema = {
+    '1m': {
+        'SMA': [5, 15, 30],
+        'EMA': [5, 15, 30]
+    },
+    '2m': {
+        'SMA': [5, 15, 30],
+        'EMA': [5, 15, 30]
+    },
+    '5m': {
+        'SMA': [10, 20, 50],
+        'EMA': [10, 20, 50]
+    },
+    '15m': {
+        'SMA': [10, 30, 60],
+        'EMA': [10, 30, 60]
+    },
+    '30m': {
+        'SMA': [10, 30, 60],
+        'EMA': [10, 30, 60]
+    },
+    '90m': {
+        'SMA': [20, 50, 100],
+        'EMA': [20, 50, 100]
+    },
+    '1h': {
+        'SMA': [20, 50, 100],
+        'EMA': [20, 50, 100]
+    },
     'daily': {
         'SMA': [10, 50, 200],
         'EMA': [12, 26, 50]
@@ -35,18 +67,6 @@ timeframe_sma_ema = {
     '3mo': {
         'SMA': [1, 4, 8],
         'EMA': [1, 4, 8]
-    },
-    '6mo': {
-        'SMA': [1, 2, 4],
-        'EMA': [1, 2, 4]
-    },
-    '1y': {
-        'SMA': [1, 2, 5],
-        'EMA': [1, 2, 5]
-    },
-    '5y': {
-        'SMA': [2, 5, 10],
-        'EMA': [2, 5, 10]
     }
 }
 
@@ -70,20 +90,26 @@ def calculate_returns(data):
     
     # Logarithmic returns
     data['Log Return'] = np.log(data['Close'] / data['Close'].shift(1))
-    
+
+    data['Simple Return'].fillna(method='bfill', inplace=True)
+    data['Log Return'].fillna(method='bfill', inplace=True)
     return data
 
 # Function to calculate historical volatility with forward-fill for empty values
 def calculate_volatility(data, timeframe):
     # Set the appropriate number of periods in a year depending on the timeframe
     periods_in_year = {
-        'daily': 252,     # 252 trading days in a year
-        'weekly': 52,     # 52 weeks in a year
-        'monthly': 12,    # 12 months in a year
-        '3mo': 4,         # 4 quarters in a year (3-month periods)
-        '6mo': 2,         # 2 half-year periods in a year
-        '1y': 1,          # 1 year
-        '5y': 1/5         # 1 year spans 5 years (inverse)
+        '1m': 252 * 390,      # 390 trading minutes per day, 252 trading days per year
+        '2m': 252 * 195,      # 195 two-minute intervals per day
+        '5m': 252 * 78,       # 78 five-minute intervals per day
+        '15m': 252 * 26,      # 26 fifteen-minute intervals per day
+        '30m': 252 * 13,      # 13 thirty-minute intervals per day
+        '1h': 252 * 6.5,      # Alternative hourly timeframe (same as '60m')
+        '90m': 252 * 4.33,    # Approximately 4.33 ninety-minute intervals per day
+        'daily': 252,         # 252 trading days in a year
+        'weekly': 52,            # 52 weeks in a year
+        'monthly': 12,            # 12 months in a year
+        '3mo': 4,             # 4 quarters in a year (3-month periods)
     }
     
     # Default window size for rolling volatility is set to 21 periods (can be adjusted if needed)
@@ -98,7 +124,7 @@ def calculate_volatility(data, timeframe):
         )
     
     # Fill NaN or 0 values with the last available non-null value
-    data['Volatility'] = data['Volatility'].replace(0, np.nan).fillna(method='ffill')
+    data['Volatility'] = data['Volatility'].replace(0, np.nan).fillna(method='bfill')
 
     return data
 
@@ -109,6 +135,9 @@ def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
     data['MACD'] = data['Close'].ewm(span=short_window, adjust=False).mean() - data['Close'].ewm(span=long_window, adjust=False).mean()
     data['Signal Line'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()  # Signal line
     data['Histogram'] = data['MACD'] - data['Signal Line']
+    data['MACD'].fillna(method='bfill', inplace=True)
+    data['Signal Line'].fillna(method='bfill', inplace=True)
+    data['Histogram'].fillna(method='bfill', inplace=True)
     return data
 
 # Function to calculate RSI
@@ -134,7 +163,7 @@ def calculate_rsi(data, period=14):
 
     # Calculate RSI
     data['RSI'] = 100 - (100 / (1 + rs))
-
+    data['RSI'].fillna(method='bfill', inplace=True)
     return data
 
 
@@ -150,7 +179,6 @@ def calculate_bollinger_bands(data, window=20, num_std_dev=2):
     data['Lower Band'] = data['Middle Band'] - (rolling_std * num_std_dev)
 
     return data
-
 
 # Ensure the 'historical data' directory exists
 output_dir = 'hist_data'
@@ -174,7 +202,14 @@ with open(os.devnull, 'w') as devnull:
             
             # Download data for different timeframes
             for timeframe, period in timeframes.items():
-                data = yf.download(s, period='max', interval=period)
+                # Set maximum period for intraday intervals up to last 60 days
+                if timeframe in ['1m']:
+                    download_period = '5d' 
+                elif timeframe in ['2m', '5m', '15m', '30m', '60m', '90m', '1h']: 
+                    download_period = '1mo' 
+                else: 
+                    download_period = 'max'
+                data = yf.download(s, period=download_period, interval=period)
                 
                 # Skip if no data is found
                 if data.empty:
@@ -197,8 +232,12 @@ with open(os.devnull, 'w') as devnull:
                 # Calculate Bollinger Bands
                 data = calculate_bollinger_bands(data)
 
-                # Save the data for each timeframe
-                data.to_csv(f'{output_dir}/{s}_{timeframe}.csv')
+                # Create a folder for each timeframe if it doesn't exist
+                timeframe_dir = os.path.join(output_dir, timeframe)
+                os.makedirs(timeframe_dir, exist_ok=True)
+
+                # Save the data for each stock in the corresponding timeframe folder
+                data.to_csv(os.path.join(timeframe_dir, f'{s}.csv'))
 
                 # Save dividends, splits, and other data for the symbol
                 stock = yf.Ticker(s)
@@ -206,27 +245,27 @@ with open(os.devnull, 'w') as devnull:
                 # Uncomment to save other data if needed
                 # dividends = stock.dividends
                 # if not dividends.empty:
-                #     dividends.to_csv(f'{output_dir}/{s}_dividends.csv')
+                #     dividends.to_csv(f'{timeframe_dir}/{s}_dividends.csv')
 
                 # splits = stock.splits
                 # if not splits.empty:
-                #     splits.to_csv(f'{output_dir}/{s}_splits.csv')
+                #     splits.to_csv(f'{timeframe_dir}/{s}_splits.csv')
 
                 # quarterly_earnings = stock.quarterly_earnings  # Quarterly earnings data
                 # if quarterly_earnings is not None and not quarterly_earnings.empty:
-                #     quarterly_earnings.to_csv(f'{output_dir}/{s}_quarterly_earnings.csv')
+                #     quarterly_earnings.to_csv(f'{timeframe_dir}/{s}_quarterly_earnings.csv')
 
                 # financials = stock.financials  # Yearly financials
                 # if financials is not None and not financials.empty:
-                #     financials.to_csv(f'{output_dir}/{s}_financials.csv')
+                #     financials.to_csv(f'{timeframe_dir}/{s}_financials.csv')
 
                 # quarterly_financials = stock.quarterly_financials  # Quarterly financials
                 # if quarterly_financials is not None and not quarterly_financials.empty:
-                #     quarterly_financials.to_csv(f'{output_dir}/{s}_quarterly_financials.csv')
+                #     quarterly_financials.to_csv(f'{timeframe_dir}/{s}_quarterly_financials.csv')
 
                 # recommendations = stock.recommendations  # Analyst recommendations
                 # if recommendations is not None and not recommendations.empty:
-                #     recommendations.to_csv(f'{output_dir}/{s}_recommendations.csv')
+                #     recommendations.to_csv(f'{timeframe_dir}/{s}_recommendations.csv')
 
             # Mark the symbol as valid if data was saved
             is_valid[i] = True
