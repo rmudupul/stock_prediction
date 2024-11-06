@@ -93,41 +93,6 @@ def calculate_volatility(data, timeframe):
     annualization_factor = np.sqrt(periods_in_year[timeframe])
 
     # Calculate daily (or respective timeframe) volatility and annualize it
-    def volatility_calculation(x):
-        if len(x) < 2:  # Less than 2 points, we can't calculate standard deviation
-            return np.nan
-        return np.std(x, ddof=0) * annualization_factor
-
-    data['Volatility'] = data['Log Return'].rolling(window=window_size, min_periods=1).apply(
-        volatility_calculation, raw=True
-    )
-
-    # Fill missing values with available data if there are less than 21 data points
-    for i in range(len(data)):
-        if pd.isna(data['Volatility'].iloc[i]) and i >= window_size:
-            available_data = data['Log Return'].iloc[i-window_size+1:i+1]
-            if len(available_data) > 0:
-                data['Volatility'].iloc[i] = volatility_calculation(available_data)
-
-    return data
-    # Set the appropriate number of periods in a year depending on the timeframe
-    periods_in_year = {
-        'daily': 252,     # 252 trading days in a year
-        'weekly': 52,     # 52 weeks in a year
-        'monthly': 12,    # 12 months in a year
-        '3mo': 4,         # 4 quarters in a year (3-month periods)
-        '6mo': 2,         # 2 half-year periods in a year
-        '1y': 1,          # 1 year
-        '5y': 1/5         # 1 year spans 5 years (inverse)
-    }
-    
-    # Default window size for rolling volatility is set to 21 periods (can be adjusted if needed)
-    window_size = 21
-
-    # Use the number of periods per year specific to the timeframe
-    annualization_factor = np.sqrt(periods_in_year[timeframe])
-
-    # Calculate daily (or respective timeframe) volatility and annualize it
     data['Volatility'] = data['Log Return'].rolling(window=window_size, min_periods=1).apply(
             lambda x: np.std(x, ddof=0) * annualization_factor, raw=True
         )
